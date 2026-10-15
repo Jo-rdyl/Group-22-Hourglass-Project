@@ -61,12 +61,20 @@ void setSandLed(byte device,
                 byte column,
                 bool state,
                 bool flip180) {
-  if (flip180) {
+  if (flip180 != rotated) {
     row = 7 - row;
     column = 7 - column;
   }
 
   matrix.setLed(device, row, column, state);
+}
+
+void flipAndReset() {
+  byte temp = UPPER_MATRIX;
+  UPPER_MATRIX = LOWER_MATRIX;
+  LOWER_MATRIX = temp;
+
+  resetHourglass();   // full pile on the new top matrix, empty bottom
 }
 
 // Creates the order in which grains pile up
@@ -266,10 +274,12 @@ void setup() {
 }
 
 void loop() {
-  if (tilted() == 1) {           // no argument
-    resetHourglass();
-  } else if (tilted() == 0) {
-    loop();
+  int state = tilted();
+
+  if (state == 1) {
+    flipAndReset();
+  } else if (state == 0) {
+    delay(50);                  // board is flat: pause
   } else {
     if (upperGrains > 0) {
       transferOneGrain();
