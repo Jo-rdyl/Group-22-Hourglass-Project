@@ -8,7 +8,8 @@ const byte CS_PIN  = 7;
 
 // Each button connects its pin to GND when pressed.
 const byte TENS_BUTTON_PIN = 2;
-const byte ONES_BUTTON_PIN = 4;
+const byte ONES_BUTTON_PIN = 3;
+const byte CONFIRM_BUTTON_PIN = 4;
 
 LedControl matrix(DIN_PIN, CLK_PIN, CS_PIN, 2);
 
@@ -41,7 +42,6 @@ const unsigned int FINISHED_PAUSE_MS = 2500;
 // ================= Time Setting =================
 
 const unsigned int BUTTON_DEBOUNCE_MS = 30;
-const unsigned int CONFIRM_HOLD_MS = 1000;
 const unsigned int DIGIT_FRAME_MS = 30;
 
 // Upper screen = tens; lower screen = ones. Range: 00-99 minutes.
@@ -153,16 +153,13 @@ void incrementTimeDigit(byte index) {
 }
 
 // Enter time setting at boot. Each released button increments one digit.
-// Hold both buttons for one second to confirm a nonzero time.
+// Press D4 to confirm a nonzero time and start immediately after debounce.
 void setTime() {
-  const byte pins[2] = {TENS_BUTTON_PIN, ONES_BUTTON_PIN};
-  bool lastRaw[2] = {HIGH, HIGH};
-  bool stable[2] = {HIGH, HIGH};
-  bool armed[2] = {false, false};
-  unsigned long changedAt[2] = {millis(), millis()};
-  bool confirming = false;
-  bool suppressRelease = false;
-  unsigned long confirmStartedAt = 0;
+  const byte pins[3] = {TENS_BUTTON_PIN, ONES_BUTTON_PIN, CONFIRM_BUTTON_PIN};
+  bool lastRaw[3] = {HIGH, HIGH, HIGH};
+  bool stable[3] = {HIGH, HIGH, HIGH};
+  bool armed[3] = {false, false, false};
+  unsigned long changedAt[3] = {millis(), millis(), millis()};
 
   selectedMinutes = 0;
   for (byte i = 0; i < 2; i++) {
@@ -174,9 +171,10 @@ void setTime() {
 
   while (true) {
     unsigned long now = millis();
-    bool released[2] = {false, false};
+    bool pressed[3] = {false, false, false};
+    bool released[3] = {false, false, false};
 
-    for (byte i = 0; i < 2; i++) {
+    for (byte i = 0; i < 3; i++) {
       bool raw = digitalRead(pins[i]);
       if (raw != lastRaw[i]) {
         lastRaw[i] = raw;
@@ -185,6 +183,7 @@ void setTime() {
       if (raw != stable[i] && now - changedAt[i] >= BUTTON_DEBOUNCE_MS) {
         stable[i] = raw;
         if (stable[i] == LOW) {
+          pressed[i] = true;
           armed[i] = true;
         } else {
           released[i] = armed[i];
@@ -193,32 +192,13 @@ void setTime() {
       }
     }
 
-    if (stable[0] == LOW && stable[1] == LOW) {
-      suppressRelease = true;
-      if (!confirming) {
-        confirming = true;
-        confirmStartedAt = now;
-      }
-      if (selectedMinutes > 0 && now - confirmStartedAt >= CONFIRM_HOLD_MS) {
-        // Do not carry a held confirmation button into the running mode.
-        while (digitalRead(pins[0]) == LOW || digitalRead(pins[1]) == LOW) {
-          drawSelectedTime();
-          delay(2);
-        }
-        runDurationMs = (unsigned long)selectedMinutes * 60000UL;
-        return;
-      }
-    } else {
-      confirming = false;
+    for (byte i = 0; i < 2; i++) {
+      if (released[i]) incrementTimeDigit(i);
     }
 
-    if (!suppressRelease) {
-      for (byte i = 0; i < 2; i++) {
-        if (released[i]) incrementTimeDigit(i);
-      }
-    }
-    if (stable[0] == HIGH && stable[1] == HIGH) {
-      suppressRelease = false;
+    if (pressed[2] && selectedMinutes > 0) {
+      runDurationMs = (unsigned long)selectedMinutes * 60000UL;
+      return;
     }
 
     drawSelectedTime();
@@ -370,6 +350,7 @@ void resetHourglass() {
 void setup() {
   pinMode(TENS_BUTTON_PIN, INPUT_PULLUP);
   pinMode(ONES_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(CONFIRM_BUTTON_PIN, INPUT_PULLUP);
   createPileOrder();
 
   for (byte device = 0; device < 2; device++) {
