@@ -53,6 +53,16 @@ unsigned long digitStartedAt[2] = {0, 0};
 unsigned long runStartedAt = 0;
 unsigned long runDurationMs = 0;
 
+// Share button states between setting and running, so holding D4 cannot
+// immediately trigger a second action when the mode changes.
+const byte BUTTON_PINS[3] = {TENS_BUTTON_PIN, ONES_BUTTON_PIN, CONFIRM_BUTTON_PIN};
+bool buttonRaw[3] = {HIGH, HIGH, HIGH};
+bool buttonStable[3] = {HIGH, HIGH, HIGH};
+bool buttonArmed[3] = {false, false, false};
+bool buttonPressed[3] = {false, false, false};
+bool buttonReleased[3] = {false, false, false};
+unsigned long buttonChangedAt[3] = {0, 0, 0};
+
 // Diamond-mounted digit font: (0,0) is the top tip, (7,7) the bottom.
 // Horizontal strokes follow row+column=constant; vertical strokes run
 // along the (1,1) direction, just like the falling sand.
@@ -152,51 +162,49 @@ void incrementTimeDigit(byte index) {
   selectedMinutes = timeDigits[0] * 10 + timeDigits[1];
 }
 
-// Enter time setting at boot. Each released button increments one digit.
-// Press D4 to confirm a nonzero time and start immediately after debounce.
-void setTime() {
-  const byte pins[3] = {TENS_BUTTON_PIN, ONES_BUTTON_PIN, CONFIRM_BUTTON_PIN};
-  bool lastRaw[3] = {HIGH, HIGH, HIGH};
-  bool stable[3] = {HIGH, HIGH, HIGH};
-  bool armed[3] = {false, false, false};
-  unsigned long changedAt[3] = {millis(), millis(), millis()};
+void updateButtons() {
+  unsigned long now = millis();
+  for (byte i = 0; i < 3; i++) {
+    buttonPressed[i] = false;
+    buttonReleased[i] = false;
+    bool raw = digitalRead(BUTTON_PINS[i]);
+    if (raw != buttonRaw[i]) {
+      buttonRaw[i] = raw;
+      buttonChangedAt[i] = now;
+    }
+    if (raw != buttonStable[i] && now - buttonChangedAt[i] >= BUTTON_DEBOUNCE_MS) {
+      buttonStable[i] = raw;
+      if (raw == LOW) {
+        buttonPressed[i] = true;
+        buttonArmed[i] = true;
+      } else {
+        buttonReleased[i] = buttonArmed[i];
+        buttonArmed[i] = false;
+      }
+    }
+  }
+}
 
-  selectedMinutes = 0;
+// The same setting screen is used at boot (00) and when D4 stops a run
+// (remaining whole minutes, rounded UP so partial minutes are visible).
+void setTime(byte initialMinutes) {
+  selectedMinutes = initialMinutes;
+  timeDigits[0] = initialMinutes / 10;
+  timeDigits[1] = initialMinutes % 10;
   for (byte i = 0; i < 2; i++) {
-    timeDigits[i] = 0;
-    previousDigits[i] = 0;
+    previousDigits[i] = timeDigits[i];
     digitRolling[i] = false;
+    buttonArmed[i] = false;
   }
   drawSelectedTime();
 
   while (true) {
-    unsigned long now = millis();
-    bool pressed[3] = {false, false, false};
-    bool released[3] = {false, false, false};
-
-    for (byte i = 0; i < 3; i++) {
-      bool raw = digitalRead(pins[i]);
-      if (raw != lastRaw[i]) {
-        lastRaw[i] = raw;
-        changedAt[i] = now;
-      }
-      if (raw != stable[i] && now - changedAt[i] >= BUTTON_DEBOUNCE_MS) {
-        stable[i] = raw;
-        if (stable[i] == LOW) {
-          pressed[i] = true;
-          armed[i] = true;
-        } else {
-          released[i] = armed[i];
-          armed[i] = false;
-        }
-      }
-    }
-
+    updateButtons();
     for (byte i = 0; i < 2; i++) {
-      if (released[i]) incrementTimeDigit(i);
+      if (buttonReleased[i]) incrementTimeDigit(i);
     }
 
-    if (pressed[2] && selectedMinutes > 0) {
+    if (buttonPressed[2] && selectedMinutes > 0) {
       runDurationMs = (unsigned long)selectedMinutes * 60000UL;
       return;
     }
@@ -287,6 +295,8 @@ void drawHourglass() {
 
 // ================= Hourglass Animation =================
 
+void returnToTimeSetting();
+
 void transferOneGrain() {
   if (upperGrains == 0) {
     return;
@@ -326,7 +336,16 @@ void transferOneGrain() {
       LOWER_FLIP_180
     );
 
-    delay(FALL_FRAME_MS);
+    // Keep D4 responsive even while a grain is falling.
+    unsigned long frameStartedAt = millis();
+    while (millis() - frameStartedAt < FALL_FRAME_MS) {
+      updateButtons();
+      if (buttonPressed[2]) {
+        returnToTimeSetting();
+        return;
+      }
+      delay(2);
+    }
   }
 
   // Add the grain to the lower settled pile.
@@ -345,12 +364,27 @@ void resetHourglass() {
   runStartedAt = millis();
 }
 
+void returnToTimeSetting() {
+  unsigned long elapsed = millis() - runStartedAt;
+  unsigned long remainingMs = elapsed < runDurationMs ? runDurationMs - elapsed : 0;
+  byte remainingMinutes = (remainingMs + 59999UL) / 60000UL;
+  setTime(remainingMinutes);
+  // Reuse the original startup flow: refill and start the selected time.
+  resetHourglass();
+}
+
 // ================= Arduino Main Program =================
 
 void setup() {
   pinMode(TENS_BUTTON_PIN, INPUT_PULLUP);
   pinMode(ONES_BUTTON_PIN, INPUT_PULLUP);
   pinMode(CONFIRM_BUTTON_PIN, INPUT_PULLUP);
+  for (byte i = 0; i < 3; i++) {
+    buttonRaw[i] = HIGH;
+    buttonStable[i] = HIGH;
+    buttonArmed[i] = false;
+    buttonChangedAt[i] = millis();
+  }
   createPileOrder();
 
   for (byte device = 0; device < 2; device++) {
@@ -364,11 +398,16 @@ void setup() {
     matrix.clearDisplay(device);
   }
 
-  setTime();
+  setTime(0);
   resetHourglass();
 }
 
 void loop() {
+  updateButtons();
+  if (upperGrains > 0 && buttonPressed[2]) {
+    returnToTimeSetting();
+    return;
+  }
   if (upperGrains > 0) {
     // Make each grain LAND at its scheduled time, including its animation.
     byte fallFrames = 0;
