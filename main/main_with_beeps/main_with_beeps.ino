@@ -39,6 +39,9 @@ const unsigned int FALL_FRAME_MS = 60;
 // after all the sand has finished falling.
 const unsigned int FINISHED_PAUSE_MS = 2500;
 
+// Speaker (audio module signal goes through the 10K resistor to L or R).
+const byte SPEAKER_PIN = 9;
+
 // Boot animation timing (all in milliseconds).
 const unsigned int BOOT_FILL_MS = 12;    // delay between grains filling the top
 const unsigned int BOOT_STREAM_MS = 40;  // delay between steps of the falling stream
@@ -49,6 +52,12 @@ const unsigned int BOOT_WIPE_MS = 40;    // delay between steps of the final wip
 
 const unsigned int BUTTON_DEBOUNCE_MS = 30;
 const unsigned int DIGIT_FRAME_MS = 30;
+
+// Button press sounds: one short blip per press, a different pitch per button.
+// tone() with a duration returns immediately, so it never slows down the
+// buttons or the sand animation.
+const unsigned int BUTTON_TONES[3] = {523, 659, 1047};  // tens = C5, ones = E5, confirm = C6
+const unsigned int BUTTON_BEEP_MS = 50;
 
 // Upper screen = tens; lower screen = ones. Range: 00-99 minutes.
 byte selectedMinutes = 0;
@@ -183,6 +192,7 @@ void updateButtons() {
       if (raw == LOW) {
         buttonPressed[i] = true;
         buttonArmed[i] = true;
+        tone(SPEAKER_PIN, BUTTON_TONES[i], BUTTON_BEEP_MS);  // press sound
       } else {
         buttonReleased[i] = buttonArmed[i];
         buttonArmed[i] = false;
@@ -418,6 +428,38 @@ void bootAnimation() {
   matrix.clearDisplay(LOWER_MATRIX);
 }
 
+// ================= Finished Chime =================
+
+// A short original chime (about 2.4 seconds), all notes from the C major scale:
+// a soft rising sparkle, a high note left to ring, then a gentle descent
+// that settles on a long low note.
+void playFinishedChime() {
+  const int rising[3]  = {523, 659, 784};   // C5, E5, G5
+  const int falling[3] = {784, 659, 523};   // G5, E5, C5
+
+  // Rising sparkle
+  for (byte i = 0; i < 3; i++) {
+    tone(SPEAKER_PIN, rising[i], 120);
+    delay(150);
+  }
+
+  // High C6, held so it rings
+  tone(SPEAKER_PIN, 1047, 450);
+  delay(520);
+
+  // Gentle descent
+  for (byte i = 0; i < 3; i++) {
+    tone(SPEAKER_PIN, falling[i], 180);
+    delay(220);
+  }
+
+  // Settle on a long final C5
+  tone(SPEAKER_PIN, 523, 700);
+  delay(750);
+
+  noTone(SPEAKER_PIN);
+}
+
 // ================= Arduino Main Program =================
 
 void setup() {
@@ -470,8 +512,9 @@ void loop() {
       delay(1);
     }
   } else {
-    // Wait after all the sand has finished falling.
-    delay(FINISHED_PAUSE_MS);
+    // All the sand has finished falling: play the chime
+    // (it also acts as the pause before the automatic restart).
+    playFinishedChime();
 
     // Refill the upper matrix and start again automatically.
     resetHourglass();
