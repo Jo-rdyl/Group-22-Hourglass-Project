@@ -16,8 +16,8 @@ LedControl matrix(DIN_PIN, CLK_PIN, CS_PIN, 2);
 // The matrix closest to the Arduino is device 0.
 // According to the wiring diagram, the lower matrix is 0
 // and the upper matrix is 1.
-const byte LOWER_MATRIX = 0;
-const byte UPPER_MATRIX = 1;
+const byte LOWER_MATRIX = 1;
+const byte UPPER_MATRIX = 0;
 
 // If the upper and lower matrices are reversed,
 // swap the two device numbers above.
