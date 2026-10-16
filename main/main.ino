@@ -52,6 +52,9 @@ bool digitRolling[2] = {false, false};
 unsigned long digitStartedAt[2] = {0, 0};
 unsigned long runStartedAt = 0;
 unsigned long runDurationMs = 0;
+bool timeEdited = false;
+byte scheduleLowerStart = 0;
+byte scheduleGrains = 64;
 
 // Share button states between setting and running, so holding D4 cannot
 // immediately trigger a second action when the mode changes.
@@ -155,6 +158,7 @@ void drawSelectedTime() {
 }
 
 void incrementTimeDigit(byte index) {
+  timeEdited = true;
   previousDigits[index] = timeDigits[index];
   timeDigits[index] = (timeDigits[index] + 1) % 10;
   digitStartedAt[index] = millis();
@@ -188,6 +192,7 @@ void updateButtons() {
 // The same setting screen is used at boot (00) and when D4 stops a run
 // (remaining whole minutes, rounded UP so partial minutes are visible).
 void setTime(byte initialMinutes) {
+  timeEdited = false;
   selectedMinutes = initialMinutes;
   timeDigits[0] = initialMinutes / 10;
   timeDigits[1] = initialMinutes % 10;
@@ -295,7 +300,7 @@ void drawHourglass() {
 
 // ================= Hourglass Animation =================
 
-void returnToTimeSetting();
+void returnToTimeSetting(bool grainInFlight);
 
 void transferOneGrain() {
   if (upperGrains == 0) {
@@ -338,11 +343,28 @@ void transferOneGrain() {
 
     // Keep D4 responsive even while a grain is falling.
     unsigned long frameStartedAt = millis();
-    while (millis() - frameStartedAt < FALL_FRAME_MS) {
+    unsigned long frameDurationMs = FALL_FRAME_MS;
+    while (millis() - frameStartedAt < frameDurationMs) {
       updateButtons();
       if (buttonPressed[2]) {
-        returnToTimeSetting();
-        return;
+        unsigned long pausedAt = millis();
+        unsigned long elapsedInFrame = pausedAt - frameStartedAt;
+        returnToTimeSetting(true);
+        // Continue this exact frame; time spent setting is not fall time.
+        frameStartedAt += millis() - pausedAt;
+        if (timeEdited) {
+          // Keep this grain's position, but land it on the new schedule.
+          // This also handles changing the time during the very last grain.
+          byte laterFrames = 0;
+          for (byte next = position + 1; next < 8; next++) {
+            if (positionHasSand(lowerGrains, next, next)) break;
+            laterFrames++;
+          }
+          unsigned long landingTime = runDurationMs / scheduleGrains;
+          unsigned long laterDuration = (unsigned long)laterFrames * FALL_FRAME_MS;
+          frameDurationMs = elapsedInFrame + (landingTime > laterDuration ? landingTime - laterDuration : 0);
+        }
+        setSandLed(LOWER_MATRIX, position, position, true, LOWER_FLIP_180);
       }
       delay(2);
     }
@@ -359,18 +381,32 @@ void transferOneGrain() {
 void resetHourglass() {
   upperGrains = 64;
   lowerGrains = 0;
+  scheduleLowerStart = 0;
+  scheduleGrains = 64;
 
   drawHourglass();
   runStartedAt = millis();
 }
 
-void returnToTimeSetting() {
-  unsigned long elapsed = millis() - runStartedAt;
+void returnToTimeSetting(bool grainInFlight) {
+  unsigned long pausedAt = millis();
+  unsigned long originalDurationMs = runDurationMs;
+  unsigned long elapsed = pausedAt - runStartedAt;
   unsigned long remainingMs = elapsed < runDurationMs ? runDurationMs - elapsed : 0;
   byte remainingMinutes = (remainingMs + 59999UL) / 60000UL;
   setTime(remainingMinutes);
-  // Reuse the original startup flow: refill and start the selected time.
-  resetHourglass();
+  if (!timeEdited) {
+    // Keep the exact seconds and grain schedule; only exclude the pause.
+    runDurationMs = originalDurationMs;
+    runStartedAt += millis() - pausedAt;
+  } else {
+    // Spread only the remaining grains over the newly chosen duration.
+    scheduleLowerStart = lowerGrains;
+    scheduleGrains = upperGrains + (grainInFlight ? 1 : 0);
+    runStartedAt = millis();
+  }
+  // Restore both piles without refilling either matrix.
+  drawHourglass();
 }
 
 // ================= Arduino Main Program =================
@@ -405,7 +441,7 @@ void setup() {
 void loop() {
   updateButtons();
   if (upperGrains > 0 && buttonPressed[2]) {
-    returnToTimeSetting();
+    returnToTimeSetting(false);
     return;
   }
   if (upperGrains > 0) {
@@ -416,9 +452,10 @@ void loop() {
       fallFrames++;
     }
     unsigned long fallDuration = (unsigned long)fallFrames * FALL_FRAME_MS;
-    unsigned long landingTime = runDurationMs * (lowerGrains + 1UL) / 64UL;
+    unsigned long landingTime = runDurationMs * (lowerGrains - scheduleLowerStart + 1UL) / scheduleGrains;
     unsigned long elapsed = millis() - runStartedAt;
-    if (elapsed >= landingTime - fallDuration) {
+    unsigned long fallStartTime = landingTime > fallDuration ? landingTime - fallDuration : 0;
+    if (elapsed >= fallStartTime) {
       transferOneGrain();
     } else {
       delay(1);
