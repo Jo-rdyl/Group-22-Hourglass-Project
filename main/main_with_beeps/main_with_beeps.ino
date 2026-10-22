@@ -8,8 +8,8 @@ Adafruit_MPU6050 mpu;
 // ================= Pin Configuration =================
 
 const byte DIN_PIN = 11;
-const byte CLK_PIN = 13;
-const byte CS_PIN  = 7;
+const byte CLK_PIN = 12;
+const byte CS_PIN  = 13;
 
 // Each button connects its pin to GND when pressed.
 const byte TENS_BUTTON_PIN = 2;
