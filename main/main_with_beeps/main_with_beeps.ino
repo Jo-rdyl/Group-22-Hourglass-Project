@@ -1,4 +1,9 @@
 #include <LedControl.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <Wire.h>
+
+Adafruit_MPU6050 mpu;
 
 // ================= Pin Configuration =================
 
@@ -16,8 +21,13 @@ LedControl matrix(DIN_PIN, CLK_PIN, CS_PIN, 2);
 // The matrix closest to the Arduino is device 0.
 // According to the wiring diagram, the lower matrix is 0
 // and the upper matrix is 1.
-const byte LOWER_MATRIX = 1;
-const byte UPPER_MATRIX = 0;
+// These are NOT const: they swap when the hourglass is turned over, so the
+// matrix that is physically on top is always UPPER_MATRIX.
+byte LOWER_MATRIX = 1;
+byte UPPER_MATRIX = 0;
+
+// True while the hourglass is turned over (everything is drawn rotated 180 degrees).
+bool rotated = false;
 
 // If the upper and lower matrices are reversed,
 // swap the two device numbers above.
@@ -47,6 +57,18 @@ const unsigned int BOOT_FILL_MS = 12;    // delay between grains filling the top
 const unsigned int BOOT_STREAM_MS = 40;  // delay between steps of the falling stream
 const unsigned int BOOT_HOLD_MS = 300;   // pause before the screen is wiped
 const unsigned int BOOT_WIPE_MS = 40;    // delay between steps of the final wipe
+
+// ================= Orientation (MPU6050) =================
+
+// A new position must hold this long before it counts. This stops a knock
+// or a shake from being mistaken for a flip (which would restart the timer).
+const unsigned int ORIENTATION_SETTLE_MS = 150;
+
+bool mpuFound = false;
+int xpos = 0;                  // last upright position seen: -9 or 9 (0 = not known yet)
+int stableOrientation = 0;     // filtered position: -9, 9, or 0 (on its side)
+int candidateOrientation = 0;  // position being timed before it is accepted
+unsigned long candidateSince = 0;
 
 // ================= Time Setting =================
 
@@ -111,12 +133,75 @@ void setSandLed(byte device,
                 byte column,
                 bool state,
                 bool flip180) {
-  if (flip180) {
+  if (flip180 != rotated) {
     row = 7 - row;
     column = 7 - column;
   }
 
   matrix.setLed(device, row, column, state);
+}
+
+// ================= Orientation Functions =================
+
+void initializeMPU6050() {
+  if (!mpu.begin()) {
+    // Carry on without it: the hourglass still runs, it just can't pause or flip.
+    Serial.println("MPU6050 not found - running without tilt control");
+    return;
+  }
+  mpuFound = true;
+  Serial.println("MPU6050 found");
+
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  delay(100);
+}
+
+// Raw position from the x-axis: 9 or -9 = upright / upside down, 0 = on its side.
+int rawOrientation() {
+  if (!mpuFound) return 9;   // no sensor: behave as if it is always upright
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  return (a.acceleration.x <= -3) ? -9 : (a.acceleration.x > 3) ? 9 : 0;
+}
+
+// Takes however it is sitting right now as "normal".
+void startOrientation() {
+  xpos = stableOrientation = candidateOrientation = rawOrientation();
+  candidateSince = millis();
+}
+
+// Returns  0 = on its side (pause),
+//         -1 = same way up as before (keep running),
+//          1 = just turned over (flip).
+int tilted() {
+  int raw = rawOrientation();
+  if (raw != candidateOrientation) {
+    candidateOrientation = raw;
+    candidateSince = millis();
+  }
+  if (millis() - candidateSince >= ORIENTATION_SETTLE_MS) {
+    stableOrientation = candidateOrientation;
+  }
+
+  if (stableOrientation == 0) return 0;      // on its side
+  if (xpos == 0) {                           // first upright reading: just remember it
+    xpos = stableOrientation;
+    return -1;
+  }
+  if (stableOrientation == xpos) return -1;  // same way up as before
+  xpos = stableOrientation;
+  return 1;                                  // turned over
+}
+
+// Turning the hourglass over turns each matrix upside down and swaps which
+// one is on top, so swap the matrix numbers and rotate the drawing 180 degrees.
+void flipDisplay() {
+  byte swapped = UPPER_MATRIX;
+  UPPER_MATRIX = LOWER_MATRIX;
+  LOWER_MATRIX = swapped;
+  rotated = !rotated;
 }
 
 void addTimeDigit(byte frame[8], byte value, int offset) {
@@ -165,8 +250,8 @@ void drawTimeDigit(byte device, byte index, bool flip180) {
 }
 
 void drawSelectedTime() {
-  drawTimeDigit(UPPER_MATRIX, 0, UPPER_FLIP_180);
-  drawTimeDigit(LOWER_MATRIX, 1, LOWER_FLIP_180);
+  drawTimeDigit(UPPER_MATRIX, 0, UPPER_FLIP_180 != rotated);
+  drawTimeDigit(LOWER_MATRIX, 1, LOWER_FLIP_180 != rotated);
 }
 
 void incrementTimeDigit(byte index) {
@@ -216,6 +301,7 @@ void setTime(byte initialMinutes) {
 
   while (true) {
     updateButtons();
+    if (tilted() == 1) flipDisplay();   // turned over: keep the digits the right way up
     for (byte i = 0; i < 2; i++) {
       if (buttonReleased[i]) incrementTimeDigit(i);
     }
@@ -312,6 +398,7 @@ void drawHourglass() {
 // ================= Hourglass Animation =================
 
 void returnToTimeSetting();
+void flipAndReset();
 
 void transferOneGrain() {
   if (upperGrains == 0) {
@@ -360,6 +447,10 @@ void transferOneGrain() {
         returnToTimeSetting();
         return;
       }
+      if (tilted() == 1) {   // turned over mid-fall: restart straight away
+        flipAndReset();
+        return;
+      }
       delay(2);
     }
   }
@@ -387,6 +478,36 @@ void returnToTimeSetting() {
   setTime(remainingMinutes);
   // Reuse the original startup flow: refill and start the selected time.
   resetHourglass();
+}
+
+// Turned over: swap and rotate the display, then start the same time again.
+void flipAndReset() {
+  flipDisplay();
+  resetHourglass();
+}
+
+// On its side: freeze the countdown until it is picked up again.
+void pauseWhileSideways() {
+  unsigned long lastTick = millis();
+  int state = 0;
+
+  while (state == 0) {
+    updateButtons();
+    if (upperGrains > 0 && buttonPressed[2]) {   // confirm still lets you change the time
+      returnToTimeSetting();
+      return;
+    }
+    delay(5);
+    state = tilted();
+
+    // Push the start time forward by the time spent paused, so the sand
+    // schedule carries on from exactly where it stopped.
+    unsigned long now = millis();
+    runStartedAt += now - lastTick;
+    lastTick = now;
+  }
+
+  if (state == 1) flipAndReset();   // it was turned over while on its side
 }
 
 // ================= Boot Animation =================
@@ -472,6 +593,7 @@ void setup() {
     buttonArmed[i] = false;
     buttonChangedAt[i] = millis();
   }
+  Serial.begin(9600);
   createPileOrder();
 
   for (byte device = 0; device < 2; device++) {
@@ -485,12 +607,24 @@ void setup() {
     matrix.clearDisplay(device);
   }
 
-  bootAnimation();   // plays once at power-on
-  setTime(0);        // then the user sets a time and presses confirm
-  resetHourglass();  // then the hourglass runs
+  initializeMPU6050();   // start the tilt sensor
+  bootAnimation();       // plays once at power-on
+  startOrientation();    // however it is sitting now counts as "normal"
+  setTime(0);            // then the user sets a time and presses confirm
+  resetHourglass();      // then the hourglass runs
 }
 
 void loop() {
+  int orientation = tilted();
+  if (orientation == 1) {            // turned over: restart with the new way up
+    flipAndReset();
+    return;
+  }
+  if (orientation == 0) {            // on its side: pause
+    pauseWhileSideways();
+    return;
+  }
+
   updateButtons();
   if (upperGrains > 0 && buttonPressed[2]) {
     returnToTimeSetting();
